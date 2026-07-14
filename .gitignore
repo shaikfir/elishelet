@@ -1,0 +1,9 @@
+# Build artifact (recreate with: cp index.html empty.jpg _headers dist/)
+dist/
+
+# OS / editor
+.DS_Store
+*.swp
+
+# Wrangler
+.wrangler/
