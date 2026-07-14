@@ -7,3 +7,7 @@ dist/
 
 # Wrangler
 .wrangler/
+
+# Unused / not truly transparent (baked checkerboard)
+no-bg.png
+_sticker_probe.html
