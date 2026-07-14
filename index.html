@@ -225,7 +225,19 @@ const CONFIG = {
   // (view canvas). `crop` (in imageW/imageH space) trims dead wall around the
   // subject so it fills the square better.
   sticker: { size:512, margin:16, radius:60, border:6,
-             crop:[95,120,1475,2735], maxBytes:100*1024 },
+             crop:[95,120,1475,2735], maxBytes:100*1024,
+    // WIP — true die-cut sticker from a transparent PNG cutout of the person.
+    // When `enabled`, the sticker composites text onto the cutout's note and
+    // exports on a transparent background (no white card).
+    // TODO: replace `src` with the higher-res, EMPTY-note transparent PNG,
+    //       then re-measure w/h/corners and set enabled:true.
+    cutout: {
+      enabled:false,
+      src:"PXL_20230904_093112135.PORTRAIT-removebg-preview.png",
+      w:375, h:666,
+      corners:{ TL:[55,484], TR:[248,456], BR:[251,585], BL:[60,602] },
+    },
+  },
 };
 
 const state = {
@@ -390,10 +402,11 @@ function inflate(tri, px){
     return [x+dx/len*px, y+dy/len*px];
   });
 }
-function warp(OW, OH){
+// Warp the offscreen text (`off`, OW x OH) onto `corners` in target ctx `tc`.
+function warp(tc, corners, OW, OH){
   const h=homography(
     [[0,0],[OW,0],[OW,OH],[0,OH]],
-    safeQuad(state.corners)
+    safeQuad(corners)
   );
   const N=CONFIG.mesh;
   // Precompute grid of source & mapped-dest points.
@@ -405,31 +418,31 @@ function warp(OW, OH){
       S[j][i]=[sx,sy]; Dp[j][i]=applyH(h,sx,sy);
     }
   }
-  ctx.globalCompositeOperation=state.blend;
-  ctx.globalAlpha=state.opacity;
+  tc.globalCompositeOperation=state.blend;
+  tc.globalAlpha=state.opacity;
   for(let j=0;j<N;j++) for(let i=0;i<N;i++){
     const s00=S[j][i],s10=S[j][i+1],s11=S[j+1][i+1],s01=S[j+1][i];
     const d00=Dp[j][i],d10=Dp[j][i+1],d11=Dp[j+1][i+1],d01=Dp[j+1][i];
-    drawTri([s00,s10,s11],[d00,d10,d11]);
-    drawTri([s00,s11,s01],[d00,d11,d01]);
+    drawTri(tc,[s00,s10,s11],[d00,d10,d11]);
+    drawTri(tc,[s00,s11,s01],[d00,d11,d01]);
   }
-  ctx.globalAlpha=1;
-  ctx.globalCompositeOperation="source-over";
+  tc.globalAlpha=1;
+  tc.globalCompositeOperation="source-over";
 }
-function drawTri(s, d){
+function drawTri(tc, s, d){
   const [m00,m01,m10,m11,e,f]=affineTri(s,d);
   const clip=inflate(d,0.6);
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(clip[0][0],clip[0][1]);
-  ctx.lineTo(clip[1][0],clip[1][1]);
-  ctx.lineTo(clip[2][0],clip[2][1]);
-  ctx.closePath();
-  ctx.clip();
-  ctx.setTransform(m00,m01,m10,m11,e,f);
-  ctx.drawImage(off,0,0);
-  ctx.setTransform(1,0,0,1,0,0);
-  ctx.restore();
+  tc.save();
+  tc.beginPath();
+  tc.moveTo(clip[0][0],clip[0][1]);
+  tc.lineTo(clip[1][0],clip[1][1]);
+  tc.lineTo(clip[2][0],clip[2][1]);
+  tc.closePath();
+  tc.clip();
+  tc.setTransform(m00,m01,m10,m11,e,f);
+  tc.drawImage(off,0,0);
+  tc.setTransform(1,0,0,1,0,0);
+  tc.restore();
 }
 
 /* ---------- Master render (rAF-throttled) ---------------------------------- */
@@ -444,7 +457,7 @@ function render(){
   ctx.clearRect(0,0,view.width,view.height);
   if(bg) ctx.drawImage(bg,0,0,view.width,view.height);
   const {OW,OH}=renderText();
-  warp(OW,OH);
+  warp(ctx, state.corners, OW, OH);
   updateCal();
   syncUrl();
 }
@@ -565,12 +578,39 @@ function downloadBlob(blob,name){
   a.href=URL.createObjectURL(blob); a.download=name;
   a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
 }
+// WIP: true die-cut sticker from a transparent cutout of the person.
+let cutoutImg=null;
+function ensureCutoutImg(){
+  if(cutoutImg) return Promise.resolve(cutoutImg);
+  return new Promise((res,rej)=>{ const i=new Image();
+    i.onload=()=>{cutoutImg=i;res(i);}; i.onerror=rej; i.src=CONFIG.sticker.cutout.src; });
+}
+async function buildCutoutStickerCanvas(){
+  const Z=CONFIG.sticker, CO=Z.cutout, N=Z.size;
+  const img=await ensureCutoutImg();
+  // Composite person + text warped onto its note, at native cutout resolution.
+  const base=document.createElement("canvas"); base.width=CO.w; base.height=CO.h;
+  const b=base.getContext("2d"); b.imageSmoothingQuality="high";
+  b.drawImage(img,0,0,CO.w,CO.h);
+  warp(b, CO.corners, off.width, off.height);   // reuse current text (`off`)
+  // Fit onto a transparent 512 square — die-cut, no card/border.
+  const s=document.createElement("canvas"); s.width=N; s.height=N;
+  const g=s.getContext("2d"); g.imageSmoothingEnabled=true; g.imageSmoothingQuality="high";
+  const avail=N-2*Z.margin, scale=Math.min(avail/CO.w, avail/CO.h);
+  const dw=CO.w*scale, dh=CO.h*scale;
+  g.drawImage(base,0,0,CO.w,CO.h,(N-dw)/2,(N-dh)/2,dw,dh);
+  return s;
+}
+async function getStickerCanvas(){
+  return CONFIG.sticker.cutout.enabled ? await buildCutoutStickerCanvas() : buildStickerCanvas();
+}
 document.getElementById("sticker").addEventListener("click", async ()=>{
-  const {blob,ext}=await encodeSticker(buildStickerCanvas());
+  const {blob,ext}=await encodeSticker(await getStickerCanvas());
   downloadBlob(blob,"elishelet-sticker."+ext);
   toast(ext==="webp" ? "מדבקה הורדה ✓" : "הורדה כ־PNG (הדפדפן ללא WebP)");
 });
-window.buildStickerCanvas=buildStickerCanvas; // exposed for automated testing
+window.buildStickerCanvas=buildStickerCanvas;             // exposed for testing
+window.buildCutoutStickerCanvas=buildCutoutStickerCanvas; // exposed for testing
 
 /* ---------- Corner calibration overlay ------------------------------------ */
 const cal=document.getElementById("cal");
